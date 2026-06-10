@@ -7,7 +7,14 @@ from ..normalize.company import normalize_company
 logger = logging.getLogger(__name__)
 
 DATE_PATTERN = re.compile(
-    r'(20\d{2}|19\d{2})\s*[-./年至到]\s*(20\d{2}|19\d{2}|至今|现在|present|now)'
+    r'(20\d{2}|19\d{2})'
+    r'(?:'
+    r'[.\-年/\s]*(?:\d{1,2})?\s*[-./至到—–~]\s*'
+    r'|'
+    r'(?:年|\.\d{1,2})?\s*'
+    r')'
+    r'(20\d{2}|19\d{2}|至今|现在|present|now|到现在|到今)'
+    r'(?:[.\-年/\s]*\d{1,2})?'
 )
 
 WORK_SECTION_KEYWORDS = [
@@ -80,10 +87,20 @@ def _find_work_by_patterns(lines: List[str]) -> List[str]:
 
 
 def _is_work_line(line: str) -> bool:
-    has_company = any(kw in line for kw in ['公司', '集团', '科技', '有限', '股份', 'co.', 'inc.', 'ltd.', 'company'])
     has_date = bool(DATE_PATTERN.search(line))
-    has_position = any(kw in line for kw in ['工程师', '经理', '主管', '总监', '专员', '助理', 'engineer', 'manager', 'developer'])
-    return has_company and (has_date or has_position)
+    has_position = any(kw in line for kw in [
+        '工程师', '经理', '主管', '总监', '专员', '助理',
+        'engineer', 'manager', 'developer', '开发', '设计', '产品', '运营',
+        '分析师', '顾问', '教授', '老师', '研究员',
+    ])
+    has_company_hint = any(kw in line for kw in [
+        '公司', '集团', '科技', '有限', '股份', 'co.', 'inc.', 'ltd.', 'company',
+        '字节', '阿里', '腾讯', '百度', '美团', '京东', '华为', '小米', '网易',
+        '滴滴', '快手', 'b站', '哔哩哔哩', '拼多多',
+    ])
+    has_job_keyword = any(kw in line for kw in ['任职', '就职', '工作于', '担任', '曾任'])
+
+    return has_date and (has_position or has_company_hint or has_job_keyword)
 
 
 def _split_entries(lines: List[str]) -> List[str]:
@@ -96,7 +113,16 @@ def _split_entries(lines: List[str]) -> List[str]:
             current_entry.clear()
 
     for line in lines:
-        is_new_entry = bool(DATE_PATTERN.search(line)) and any(kw in line for kw in ['公司', '集团', '科技', '有限'])
+        has_date = bool(DATE_PATTERN.search(line))
+        has_position = any(kw in line for kw in [
+            '工程师', '经理', '主管', '总监', '专员', '助理',
+            'engineer', 'manager', 'developer',
+        ])
+        has_company = any(kw in line for kw in [
+            '公司', '集团', '科技', '有限', '股份', '有限公司',
+        ])
+
+        is_new_entry = has_date and (has_position or has_company)
         if is_new_entry and current_entry:
             _flush()
         current_entry.append(line)
@@ -143,17 +169,92 @@ def _parse_single_work(text: str, warnings: List[str]) -> Optional[WorkExperienc
 
 
 def _extract_company(text: str) -> Optional[str]:
-    patterns = [
-        r'([\u4e00-\u9fa5A-Za-z\s]+(?:公司|集团|科技|技术|有限公司|股份有限公司))',
-        r'(?:就职于|任职于|工作于|在)\s*([\u4e00-\u9fa5A-Za-z\s]+?)(?:\s|$|，|,|。)',
+    first_line = text.split('\n')[0] if '\n' in text else text
+
+    explicit_patterns = [
+        r'(?:^|[\s，,。.；;])(?:就职于|任职于|工作于|曾任于|曾就职于|现就职于|加盟|加入)\s*([\u4e00-\u9fa5A-Za-z0-9·\-（）()]+)',
+        r'(?:在)\s*([\u4e00-\u9fa5A-Za-z0-9·\-（）()]+?)\s*(?:担任|任|从事|做|工作)',
     ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
+    for pattern in explicit_patterns:
+        match = re.search(pattern, first_line)
         if match:
             company = match.group(1).strip()
-            if len(company) >= 2:
+            if _is_valid_company_name(company):
                 return company
+
+    date_match = DATE_PATTERN.search(first_line)
+    if date_match:
+        after_date = first_line[date_match.end():].strip()
+        after_date = re.sub(r'^[\s\-—–·|/／、,，。.]+', '', after_date)
+
+        before_date = first_line[:date_match.start()].strip()
+        before_date = re.sub(r'[\s\-—–·|/／、,，。.]+$', '', before_date)
+
+        position_keywords = [
+            '开发工程师', '研发工程师', '软件工程师', '前端工程师', '后端工程师',
+            '算法工程师', '数据工程师', '测试工程师', '运维工程师',
+            '产品经理', '产品总监', '运营经理', '设计师', '分析师',
+            '架构师', '总经理', '副总经理', '工程师', '经理',
+            '主管', '总监', '专员', '助理', '运营',
+            '顾问', '教授', '老师', '研究员',
+            'CEO', 'CTO', 'COO', 'CFO',
+        ]
+
+        def _extract_from_part(part: str) -> Optional[str]:
+            pos_end = len(part)
+            for kw in position_keywords:
+                idx = part.find(kw)
+                if idx > 0:
+                    pos_end = min(pos_end, idx)
+
+            candidate_part = part[:pos_end].strip()
+            candidates = re.split(r'\s{2,}|\t|/|／|、|,|，|\||｜| - | – ', candidate_part)
+
+            for candidate in candidates:
+                candidate = candidate.strip()
+                if _is_valid_company_name(candidate):
+                    return candidate
+            return None
+
+        if after_date:
+            company = _extract_from_part(after_date)
+            if company:
+                return company
+
+        if before_date:
+            company = _extract_from_part(before_date)
+            if company:
+                return company
+
+    suffix_patterns = [
+        r'(^|[\s，,。.；;])([\u4e00-\u9fa5A-Za-z0-9·\-（）()]+(?:有限公司|股份有限公司|集团有限公司|有限责任公司|集团|公司))',
+    ]
+    for pattern in suffix_patterns:
+        for match in re.finditer(pattern, first_line):
+            company = match.group(2).strip()
+            if _is_valid_company_name(company) and len(company) >= 4:
+                return company
+
     return None
+
+
+def _is_valid_company_name(name: str) -> bool:
+    if not name or len(name) < 2:
+        return False
+
+    if any(kw in name for kw in ['职位', '岗位', '职务', '部门', '所属', '时间', '日期', '地点', '地址', '薪资', '工资']):
+        return False
+
+    if re.match(r'^(20\d{2}|19\d{2})', name):
+        return False
+
+    if re.match(r'^[\d\s\-./]+$', name):
+        return False
+
+    if len(name) > 50:
+        return False
+
+    return True
 
 
 def _extract_position(text: str) -> Optional[str]:

@@ -151,7 +151,7 @@ def _parse_single_education(text: str, warnings: List[str]) -> Optional[Educatio
         edu.school_tags = tags
         edu.confidence = conf
 
-    major = _extract_major(text)
+    major = _extract_major(text, school_name)
     if major:
         standard_major, maj_conf, maj_warns = normalize_major(major)
         edu.major = major
@@ -185,18 +185,73 @@ def _extract_school_name(text: str) -> Optional[str]:
     return None
 
 
-def _extract_major(text: str) -> Optional[str]:
+def _extract_major(text: str, school_name: Optional[str] = None) -> Optional[str]:
     major_patterns = [
-        r'(?:专业|主修|方向)\s*[:：]?\s*([\u4e00-\u9fa5A-Za-z0-9\s·\-]+?)(?:\s|$|,|，)',
-        r'([\u4e00-\u9fa5]{2,10}(?:工程|技术|科学|学|专业))',
+        r'(?:^|\s)(?:专业|主修|方向|专业方向|所学专业)\s*[:：]?\s*([\u4e00-\u9fa5A-Za-z0-9·\-]+)',
+        r'专业[:：]\s*([\u4e00-\u9fa5A-Za-z0-9·\-]+)',
     ]
     for pattern in major_patterns:
         match = re.search(pattern, text)
         if match:
             major = match.group(1).strip()
-            if len(major) >= 2:
+            if _is_valid_major(major, school_name):
                 return major
+
+    suffix_patterns = [
+        r'([\u4e00-\u9fa5]{2,12}?(?:工程|技术|科学|专业|学))',
+    ]
+    for pattern in suffix_patterns:
+        for match in re.finditer(pattern, text):
+            major = match.group(1).strip()
+            if _is_valid_major(major, school_name):
+                return major
+
+    if school_name:
+        degree_keywords = ['本科', '硕士', '博士', '大专', '专科', '高中', '中专', '学士', '研究生']
+        text_clean = text
+        text_clean = re.sub(r'(20\d{2}|19\d{2})[-./年至到]*(20\d{2}|19\d{2}|至今|现在|present|now)?', '', text_clean)
+        text_clean = text_clean.replace(school_name, '')
+
+        for kw in degree_keywords:
+            text_clean = text_clean.replace(kw, '')
+
+        tokens = re.split(r'\s{2,}|/|／|、|,|，|\||｜|\t', text_clean)
+        for token in tokens:
+            token = token.strip()
+            if _is_valid_major(token, school_name):
+                return token
+
     return None
+
+
+def _is_valid_major(major: str, school_name: Optional[str] = None) -> bool:
+    if not major or len(major) < 2:
+        return False
+
+    if any(kw in major for kw in ['大学', '学院', '学校', 'University', 'College', 'Institute']):
+        return False
+
+    if school_name and (school_name in major or major in school_name):
+        return False
+
+    if re.match(r'^(20\d{2}|19\d{2})', major):
+        return False
+
+    if re.match(r'^[\d\s\-./]+$', major):
+        return False
+
+    if len(major) > 20:
+        return False
+
+    degree_keywords = ['本科', '硕士', '博士', '大专', '专科', '高中', '中专',
+                       '学士', '研究生', '博士后', '学士后', '专业学位', '学术学位']
+    if major in degree_keywords:
+        return False
+
+    if re.match(r'^(专业|主修|方向|学位|学历)$', major):
+        return False
+
+    return True
 
 
 def _get_end_year(end_date: Optional[str]) -> int:
