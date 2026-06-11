@@ -61,8 +61,9 @@ def _extract_section_lines(lines: List[str], keywords: List[str]) -> List[str]:
     section_start_idx = -1
 
     for i, line in enumerate(lines):
-        lower_line = line.lower().strip()
-        is_section_header = any(kw.lower() in lower_line for kw in keywords) and len(line) < 20
+        stripped = line.strip()
+        lower_line = stripped.lower()
+        is_section_header = any(kw.lower() in lower_line for kw in keywords) and len(stripped) < 30
 
         if is_section_header and not in_section:
             in_section = True
@@ -87,20 +88,27 @@ def _find_work_by_patterns(lines: List[str]) -> List[str]:
 
 
 def _is_work_line(line: str) -> bool:
-    has_date = bool(DATE_PATTERN.search(line))
-    has_position = any(kw in line for kw in [
+    stripped = line.strip()
+    has_date = bool(DATE_PATTERN.search(stripped))
+    has_position = any(kw in stripped for kw in [
         '工程师', '经理', '主管', '总监', '专员', '助理',
         'engineer', 'manager', 'developer', '开发', '设计', '产品', '运营',
         '分析师', '顾问', '教授', '老师', '研究员',
     ])
-    has_company_hint = any(kw in line for kw in [
+    has_company_hint = any(kw in stripped for kw in [
         '公司', '集团', '科技', '有限', '股份', 'co.', 'inc.', 'ltd.', 'company',
         '字节', '阿里', '腾讯', '百度', '美团', '京东', '华为', '小米', '网易',
         '滴滴', '快手', 'b站', '哔哩哔哩', '拼多多',
     ])
-    has_job_keyword = any(kw in line for kw in ['任职', '就职', '工作于', '担任', '曾任'])
+    has_job_keyword = any(kw in stripped for kw in ['任职', '就职', '工作于', '担任', '曾任'])
 
-    return has_date and (has_position or has_company_hint or has_job_keyword)
+    if has_date and (has_position or has_company_hint or has_job_keyword):
+        return True
+
+    if has_company_hint and has_position:
+        return True
+
+    return False
 
 
 def _split_entries(lines: List[str]) -> List[str]:
@@ -113,16 +121,17 @@ def _split_entries(lines: List[str]) -> List[str]:
             current_entry.clear()
 
     for line in lines:
-        has_date = bool(DATE_PATTERN.search(line))
-        has_position = any(kw in line for kw in [
+        stripped = line.strip()
+        has_date = bool(DATE_PATTERN.search(stripped))
+        has_position = any(kw in stripped for kw in [
             '工程师', '经理', '主管', '总监', '专员', '助理',
             'engineer', 'manager', 'developer',
         ])
-        has_company = any(kw in line for kw in [
+        has_company = any(kw in stripped for kw in [
             '公司', '集团', '科技', '有限', '股份', '有限公司',
         ])
 
-        is_new_entry = has_date and (has_position or has_company)
+        is_new_entry = (has_date and (has_position or has_company)) or (has_company and has_position)
         if is_new_entry and current_entry:
             _flush()
         current_entry.append(line)
@@ -171,6 +180,20 @@ def _parse_single_work(text: str, warnings: List[str]) -> Optional[WorkExperienc
 def _extract_company(text: str) -> Optional[str]:
     first_line = text.split('\n')[0] if '\n' in text else text
 
+    def _clean_company_name(name: str) -> str:
+        if not name:
+            return ""
+        cleaned = name.strip()
+        cleaned = re.sub(r'^[\s\-—–·|/／、,，。.（）()\[\]【】《》""\'`~!@#$%^&*_+={}\\\\<>?]+', '', cleaned)
+        cleaned = re.sub(r'[\s\-—–·|/／、,，。.（）()\[\]【】《》""\'`~!@#$%^&*_+={}\\\\<>?]+$', '', cleaned)
+        cleaned = re.sub(r'[\(（]?\s*(?:深圳|北京|上海|广州|杭州|成都|武汉|西安|南京|重庆|苏州|天津|青岛|大连|厦门|福州|郑州|长沙|济南|哈尔滨|沈阳|长春|石家庄|太原|合肥|南昌|南宁|昆明|贵阳|拉萨|乌鲁木齐|呼和浩特|银川|西宁)\s*(?:分公司|公司)?[\)）]?', '', cleaned)
+        cleaned = re.sub(r'[\(（][^\)）]{0,50}[\)）]', '', cleaned)
+        cleaned = re.sub(r'[\[【][^\]】]{0,50}[\]】]', '', cleaned)
+        cleaned = re.sub(r'[\-—–·|/／、,，。.]+\s*$', '', cleaned)
+        cleaned = re.sub(r'^\s*[\-—–·|/／、,，。.]+', '', cleaned)
+        cleaned = cleaned.strip()
+        return cleaned
+
     explicit_patterns = [
         r'(?:^|[\s，,。.；;])(?:就职于|任职于|工作于|曾任于|曾就职于|现就职于|加盟|加入)\s*([\u4e00-\u9fa5A-Za-z0-9·\-（）()]+)',
         r'(?:在)\s*([\u4e00-\u9fa5A-Za-z0-9·\-（）()]+?)\s*(?:担任|任|从事|做|工作)',
@@ -179,6 +202,7 @@ def _extract_company(text: str) -> Optional[str]:
         match = re.search(pattern, first_line)
         if match:
             company = match.group(1).strip()
+            company = _clean_company_name(company)
             if _is_valid_company_name(company):
                 return company
 
@@ -212,6 +236,7 @@ def _extract_company(text: str) -> Optional[str]:
 
             for candidate in candidates:
                 candidate = candidate.strip()
+                candidate = _clean_company_name(candidate)
                 if _is_valid_company_name(candidate):
                     return candidate
             return None
@@ -232,6 +257,7 @@ def _extract_company(text: str) -> Optional[str]:
     for pattern in suffix_patterns:
         for match in re.finditer(pattern, first_line):
             company = match.group(2).strip()
+            company = _clean_company_name(company)
             if _is_valid_company_name(company) and len(company) >= 4:
                 return company
 

@@ -4,11 +4,19 @@ from typing import List, Tuple, Optional
 from ..schemas import Education
 from ..normalize.school import normalize_school
 from ..normalize.major import normalize_major
+from ..data.majors import get_major_library
 
 logger = logging.getLogger(__name__)
 
 DATE_PATTERN = re.compile(
-    r'(20\d{2}|19\d{2})\s*[-./年至到]\s*(20\d{2}|19\d{2}|至今|现在|present|now)'
+    r'(20\d{2}|19\d{2})'
+    r'(?:'
+    r'[.\-年/\s]*(?:\d{1,2})?\s*[-./至到—–~]\s*'
+    r'|'
+    r'(?:年|\.\d{1,2})?\s*'
+    r')'
+    r'(20\d{2}|19\d{2}|至今|现在|present|now|到现在|到今)'
+    r'(?:[.\-年/\s]*\d{1,2})?'
 )
 YEAR_ONLY_PATTERN = re.compile(r'(20\d{2}|19\d{2})')
 
@@ -23,6 +31,14 @@ DEGREE_KEYWORDS = {
 EDUCATION_SECTION_KEYWORDS = [
     '教育背景', '教育经历', '教育程度', '教育', '学历', '教育与培训',
     'academic background', 'education', 'educational background',
+]
+
+OTHER_SECTION_KEYWORDS = [
+    '工作经历', '工作经验', '工作', '职业经历', '工作背景', '从业经历',
+    '项目经验', '项目经历', '项目', '技能', '专业技能', '个人技能',
+    '自我评价', '个人评价', '兴趣爱好', '荣誉奖项', '获奖情况',
+    'work experience', 'experience', 'employment', 'work history',
+    'project', 'projects', 'skills', 'skill', 'self evaluation',
 ]
 
 
@@ -60,20 +76,32 @@ def extract_education(text: str) -> Tuple[List[Education], List[str]]:
 
 def _find_sections(lines: List[str]) -> dict:
     sections = {}
-    section_starts = []
+    all_section_starts = []
 
     for i, line in enumerate(lines):
-        lower_line = line.lower().strip()
+        stripped = line.strip()
+        lower_line = stripped.lower()
+
+        is_edu_section = False
         for kw in EDUCATION_SECTION_KEYWORDS:
-            if kw.lower() in lower_line and len(line) < 20:
-                section_starts.append(('education', i))
+            if kw.lower() in lower_line and len(stripped) < 30:
+                all_section_starts.append(('education', i))
+                is_edu_section = True
                 break
 
-    if section_starts:
-        section_starts.sort(key=lambda x: x[1])
-        for idx, (sec_type, start) in enumerate(section_starts):
-            next_start = section_starts[idx + 1][1] if idx + 1 < len(section_starts) else len(lines)
-            sections.setdefault(sec_type, []).append((start + 1, next_start))
+        if not is_edu_section:
+            for kw in OTHER_SECTION_KEYWORDS:
+                if kw.lower() in lower_line and len(stripped) < 30:
+                    all_section_starts.append(('other', i))
+                    break
+
+    if all_section_starts:
+        all_section_starts.sort(key=lambda x: x[1])
+        for idx, (sec_type, start) in enumerate(all_section_starts):
+            if sec_type != 'education':
+                continue
+            next_start = all_section_starts[idx + 1][1] if idx + 1 < len(all_section_starts) else len(lines)
+            sections.setdefault('education', []).append((start + 1, next_start))
 
     return sections
 
@@ -87,11 +115,26 @@ def _find_education_by_patterns(lines: List[str]) -> List[str]:
 
 
 def _is_education_line(line: str) -> bool:
-    lower = line.lower()
-    has_school = any(kw in line for kw in ['大学', '学院', '学校', 'university', 'college', 'institute', 'academy'])
-    has_date = bool(DATE_PATTERN.search(line) or YEAR_ONLY_PATTERN.search(line))
+    stripped = line.strip()
+    lower = stripped.lower()
+    
+    work_keywords = ['工程师', '经理', '主管', '总监', '专员', '助理', '开发工程师', '运营', '产品经理',
+                     '公司', '集团', '任职', '就职', '担任', '项目', '研发', '设计师']
+    if any(kw in stripped for kw in work_keywords):
+        return False
+    
+    has_school = any(kw in stripped for kw in ['大学', '学院', '学校', 'university', 'college', 'institute', 'academy'])
+    has_date = bool(DATE_PATTERN.search(stripped) or YEAR_ONLY_PATTERN.search(stripped))
     has_degree = any(kw.lower() in lower for kw in DEGREE_KEYWORDS.keys())
-    return has_school and (has_date or has_degree)
+    has_major_hint = any(kw in stripped for kw in ['工程', '技术', '科学', '专业', '学'])
+    
+    if has_school and (has_date or has_degree or has_major_hint):
+        return True
+    
+    if has_school and len(stripped) > 5:
+        return True
+    
+    return False
 
 
 def _parse_education_entries(lines: List[str], warnings: List[str]) -> List[Education]:
@@ -186,6 +229,19 @@ def _extract_school_name(text: str) -> Optional[str]:
 
 
 def _extract_major(text: str, school_name: Optional[str] = None) -> Optional[str]:
+    major_lib = get_major_library()
+    all_major_names = list(major_lib.keys()) + list(set(major_lib.values()))
+
+    longest_match = None
+    for major_name in all_major_names:
+        if major_name in text and len(major_name) >= 2:
+            if not school_name or (major_name != school_name and school_name not in major_name):
+                if longest_match is None or len(major_name) > len(longest_match):
+                    longest_match = major_name
+
+    if longest_match:
+        return longest_match
+
     major_patterns = [
         r'(?:^|\s)(?:专业|主修|方向|专业方向|所学专业)\s*[:：]?\s*([\u4e00-\u9fa5A-Za-z0-9·\-]+)',
         r'专业[:：]\s*([\u4e00-\u9fa5A-Za-z0-9·\-]+)',
@@ -198,7 +254,7 @@ def _extract_major(text: str, school_name: Optional[str] = None) -> Optional[str
                 return major
 
     suffix_patterns = [
-        r'([\u4e00-\u9fa5]{2,12}?(?:工程|技术|科学|专业|学))',
+        r'([\u4e00-\u9fa5]{2,15}(?:工程|技术|科学|专业))',
     ]
     for pattern in suffix_patterns:
         for match in re.finditer(pattern, text):
@@ -220,6 +276,18 @@ def _extract_major(text: str, school_name: Optional[str] = None) -> Optional[str
             token = token.strip()
             if _is_valid_major(token, school_name):
                 return token
+
+    best_fuzzy = None
+    best_score = 0
+    for major_name in all_major_names:
+        if len(major_name) >= 2 and major_name in text:
+            score = len(major_name)
+            if score > best_score and (not school_name or major_name != school_name):
+                best_score = score
+                best_fuzzy = major_name
+
+    if best_fuzzy:
+        return best_fuzzy
 
     return None
 
